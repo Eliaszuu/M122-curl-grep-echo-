@@ -1,41 +1,49 @@
 #!/bin/bash
 set -eu
+URL="https://en.wikipedia.org/wiki/List_of_countries_and_dependencies_by_population"
+OUTPUT_FORMAT=$1
 
-OUTPUT_FORMAT="${1:-human-readable}"
+# HTML-Inhalt holen und relevante Tabellenzeilen extrahieren (ohne Kopfzeile)
+rows=$(curl -s "$URL" | pup 'table.wikitable tbody tr json{}' | jq -c '.[]' | tail -n +2 | head -n 20)
 
-URL="https://www.srf.ch/meteo"
+declare -a countries populations percentages
 
-extract_data() {
-    curl -s "$URL" | pup 'div.weather-data' text{}
-}
+while read -r row; do
+    # Land: entweder in .children[0].children oder direkt als Text
+    country=$(echo "$row" | jq -r '
+        .children[0].children[]?.text // empty
+    ' | paste -sd " " - | sed 's/\[[^]]*\]//g' | xargs)
 
-human_readable() {
-    local temperature="$1"
-    local forecast="$2"
+    [ -z "$country" ] && country=$(echo "$row" | jq -r '.children[0].text // empty' | sed 's/\[[^]]*\]//g' | xargs)
 
-    echo -e "\033[1;32mTemperatur:\033[0m $temperature"
-    echo -e "\033[1;34mVorhersage:\033[0m $forecast"
-}
+    # Bevölkerung & Anteil
+    population=$(echo "$row" | jq -r '.children[1].text // empty' | xargs)
+    percentage=$(echo "$row" | jq -r '.children[2].text // empty' | xargs)
 
-structured_json() {
-    local temperature="$1"
-    local forecast="$2"
+    [ "$country" == "World" ] && [ -z "$percentage" ] && percentage="100%"
 
-    echo -e "{\"temperature\": \"$temperature\", \"forecast\": \"$forecast\"}"
-}
+    countries+=("$country")
+    populations+=("$population")
+    percentages+=("$percentage")
+done <<< "$rows"
 
-raw_data=$(extract_data)
+if [ "$OUTPUT_FORMAT" == "pretty" ]; then
+    echo -e "\n\033[1;34mTop 20 Länder nach Bevölkerung:\033[0m
+\033[1;32m-------------------------------------------------------------\033[0m
+\033[1;33mLand                          Bevölkerung         Anteil\033[0m
+\033[1;32m-------------------------------------------------------------\033[0m"
 
-temperature=$(echo "$raw_data" | grep -oP '(?<=Temperature:)[^<]+')
-forecast=$(echo "$raw_data" | grep -oP '(?<=Forecast:)[^<]+')
-
-if [ -z "$temperature" ] || [ -z "$forecast" ]; then
-    echo "Fehler: Keine Wetterdaten gefunden!"
-    exit 1
-fi
-
-if [ "$OUTPUT_FORMAT" == "human-readable" ]; then
-    human_readable "$temperature" "$forecast"
+    for i in "${!countries[@]}"; do
+        printf "\033[1;33m%-30s\033[0m \033[1;36m%-20s\033[0m \033[1;31m%s\033[0m\n" \
+            "${countries[$i]}" "${populations[$i]}" "${percentages[$i]}"
+    done
+elif [ "$OUTPUT_FORMAT" == "Json" ]; then
+    echo "["
+    for i in "${!countries[@]}"; do
+        echo "  { \"country\": \"${countries[$i]}\", \"population\": \"${populations[$i]}\", \"percentage\": \"${percentages[$i]}\" }$( [[ $i -lt $((${#countries[@]}-1)) ]] && echo "," )"
+    done
+    echo "]"
 else
-    structured_json "$temperature" "$forecast"
+    echo "❌ Ungültiges Format. Bitte wähle 'pretty' oder 'json'."
+    exit 1
 fi
